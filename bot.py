@@ -2477,6 +2477,15 @@ def main() -> None:
         print("Python 3.10 or newer is required.", file=sys.stderr)
         raise SystemExit(1)
 
+    # ---- FIX: Ensure an event loop exists for Python 3.14+ ----
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     app = (
         Application.builder()
         .token(BOT_TOKEN)
