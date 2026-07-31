@@ -387,6 +387,7 @@ class LogWriter:
         with contextlib.suppress(Exception):
             await self.flush()
 
+
 LOGS = LogWriter(DB)
 
 # --------------------------------------------------------------------------- #
@@ -513,8 +514,23 @@ async def get_text(user_id: int, key: str, *args) -> str:
     return template.format(*args)
 
 # --------------------------------------------------------------------------- #
-# AI Appeal Generator                                                          #
+# AI Appeal Generator (modern OpenAI v1.x)                                     #
 # --------------------------------------------------------------------------- #
+
+# Check if openai is available; fallback to template if not
+_OPENAI_AVAILABLE = False
+_openai_client = None
+
+if OPENAI_API_KEY:
+    try:
+        from openai import AsyncOpenAI
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        _OPENAI_AVAILABLE = True
+        log.info("OpenAI client initialized with API key.")
+    except ImportError:
+        log.warning("openai package not installed. Using template-based appeals.")
+    except Exception as e:
+        log.warning("OpenAI initialization failed: %s", e)
 
 async def generate_appeal(
     platform: str,
@@ -522,18 +538,16 @@ async def generate_appeal(
     description: str,
     user_details: Optional[Dict[str, str]] = None
 ) -> str:
-    if OPENAI_API_KEY:
+    """Generate a professional appeal using OpenAI (if available) or template."""
+    if _OPENAI_AVAILABLE and _openai_client:
         try:
-            import openai
-            openai.api_key = OPENAI_API_KEY
             prompt = (
                 f"Write a professional appeal for a {platform} account recovery. "
                 f"Issue: {issue_type}. Details: {description}. "
                 "The appeal should be polite, clear, and include all necessary information "
                 "to request reinstatement or resolution. Do not include false information."
             )
-            response = await asyncio.to_thread(
-                openai.ChatCompletion.create,
+            response = await _openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300,
@@ -543,7 +557,7 @@ async def generate_appeal(
         except Exception as e:
             log.warning("OpenAI generation failed: %s", e)
 
-    # Templates
+    # Template fallback
     templates = {
         ("instagram", "disabled"): (
             "Dear Instagram Support Team,\n\n"
@@ -587,7 +601,7 @@ async def generate_appeal(
     )
 
 # --------------------------------------------------------------------------- #
-# Bulk operation engine (from original code)                                   #
+# Bulk operation engine (unchanged – works as before)                         #
 # --------------------------------------------------------------------------- #
 
 # Error categories
@@ -1209,7 +1223,6 @@ async def home_screen(bot, user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
         "Select a channel to manage:"
     )
     buttons = [[(f"📡 {row['title'] or row['chat_id']}", cb("ch", int(row["chat_id"])))] for row in rows]
-    # Add admin panel button if owner
     if user_id == ADMIN_ID:
         buttons.append([("👑 ADMIN PANEL", cb("admin_panel"))])
     buttons.append([("🔄 REFRESH", cb("home"))])
@@ -1515,9 +1528,7 @@ async def admin_analytics_screen() -> Tuple[str, InlineKeyboardMarkup]:
     return text, kb([("◀️ BACK", cb("admin_panel"))])
 
 async def admin_settings_screen() -> Tuple[str, InlineKeyboardMarkup]:
-    # Could expand with language default, etc.
-    text = "⚙️ <b>ADMIN SETTINGS</b>\n\n" \
-           "Set bot-wide preferences."
+    text = "⚙️ <b>ADMIN SETTINGS</b>\n\nSet bot-wide preferences."
     return text, kb(
         [("🌐 Language Default", cb("admin_lang"))],
         [("◀️ BACK", cb("admin_panel"))],
@@ -1621,20 +1632,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None:
         return
     await register_user(user.id, user.username or "", user.full_name or "")
-    # Check if user is approved or is admin
     if user.id == ADMIN_ID or await is_user_approved(user.id):
         if user.id == ADMIN_ID:
-            # Ensure admin is approved
             await DB.execute("UPDATE users SET approved=1 WHERE user_id=?", (user.id,))
         context.user_data.pop("await", None)
         text, markup = await home_screen(context.bot, user.id)
         await update.effective_message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
     else:
-        # Not approved: send request to admin
         await DB.execute("UPDATE users SET approved=0, blocked=0 WHERE user_id=?", (user.id,))
         text = await get_text(user.id, "not_authorized")
         await update.effective_message.reply_text(text)
-        # Notify admin
         if ADMIN_ID:
             try:
                 admin_text = (
@@ -1942,9 +1949,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     state = context.user_data.get("await")
     if not state:
-        # Could be case description or evidence
         if context.user_data.get("case_platform"):
-            # We are in case creation
             platform = context.user_data["case_platform"]
             issue = context.user_data["case_issue"]
             description = message.text
@@ -1961,7 +1966,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=kb([("📝 GENERATE APPEAL", cb("gen_appeal", case_id))], [("📂 VIEW CASE", cb("view_case", case_id))], [("◀️ BACK", cb("cases", 0))])
             )
             return
-        # otherwise ignore
         return
 
     kind, chat_id = state[0], int(state[1])
@@ -2084,7 +2088,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await DB.execute("UPDATE users SET approved=1, blocked=0 WHERE user_id=?", (target,))
             await DB.execute("INSERT INTO user_actions (admin_id, target_id, action, created_at) VALUES (?,?,?,?)",
                              (user.id, target, "approve", time.time()))
-            # Notify user
             try:
                 await context.bot.send_message(target, "✅ Your access request has been approved. You can now use the bot.\n/start")
             except TelegramError:
@@ -2105,7 +2108,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await DB.execute("INSERT INTO user_actions (admin_id, target_id, action, created_at) VALUES (?,?,?,?)",
                              (user.id, target, "unblock", time.time()))
             await query.answer("User unblocked.")
-        # Refresh admin panel
         text, markup = await admin_panel_screen(user.id)
         await show(update, text, markup)
         return
@@ -2298,7 +2300,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not row or row["user_id"] != user.id:
                 await query.answer("Case not found.", show_alert=True)
                 return
-            # Get user details
             user_row = await DB.query_one("SELECT username, full_name FROM users WHERE user_id=?", (user.id,))
             user_details = {"username": user_row["username"] if user_row else "", "full_name": user_row["full_name"] if user_row else ""}
             appeal = await generate_appeal(row["platform"], row["issue_type"], row["description"], user_details)
@@ -2319,7 +2320,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if not row:
                 await query.answer("Case not found.", show_alert=True)
                 return
-            # Get evidence
             evidence_rows = await DB.query("SELECT type, content FROM evidence WHERE case_id=?", (case_id,))
             evidence_text = "\n".join([f"• {row['type']}: {row['content'][:50]}" for row in evidence_rows]) or "None"
             status_emoji = {"draft": "🟡", "ready": "🔵", "submitted": "🟢", "waiting": "⏳", "resolved": "✅", "rejected": "❌", "closed": "🔴"}.get(row["status"], "⚪")
@@ -2362,7 +2362,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         elif action == "update_status" and len(args) > 0:
             case_id = int(args[0])
-            # Provide status options
             await show(
                 update,
                 "🔄 <b>UPDATE STATUS</b>\n\nSelect new status:",
@@ -2381,7 +2380,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             status = args[1]
             await DB.execute("UPDATE cases SET status=?, updated_at=? WHERE id=? AND user_id=?", (status, time.time(), case_id, user.id))
             await query.answer("Status updated.")
-            text, markup = await cases_screen(user.id, 0)  # refresh
+            text, markup = await cases_screen(user.id, 0)
             await show(update, text, markup)
         else:
             await show(update, "Unknown action.", kb([("◀️ DASHBOARD", cb("home"))]))
